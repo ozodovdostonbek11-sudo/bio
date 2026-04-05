@@ -17,6 +17,11 @@ from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher, F, Router, types
+from aiogram.client.default import DefaultBotProperties  # SHUNI QO'SHING
+from aiogram.enums import ParseMode                      # SHUNI HAM QO'SHING
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+# ... qolgan importlar o'zgarishsiz qolaversin ...
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -1678,7 +1683,10 @@ async def main():
     db = Database(DATABASE_PATH)
     
     # Initialize bot and dispatcher
-    bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+    bot = Bot(
+    token=BOT_TOKEN, 
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
     dp = Dispatcher()
     
     # Setup default commands
