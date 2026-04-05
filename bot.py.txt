@@ -1,0 +1,1730 @@
+"""
+Premium Bio & Caption Generator Bot - Complete Production Ready Code
+Uses: aiogram 3.x, SQLite, FSM, Referral System, Leaderboard
+Language: Uzbek
+Author: Premium Bio Bot Team
+"""
+
+import logging
+import os
+import sqlite3
+import asyncio
+import random
+import string
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List, Tuple
+from dotenv import load_dotenv
+from contextlib import asynccontextmanager
+
+from aiogram import Bot, Dispatcher, F, Router, types
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    BotCommand, BotCommandScopeDefault, ChatMember
+)
+from aiogram.utils.markdown import bold, italic
+from aiogram.enums import ParseMode
+
+# ============================================================================
+# CONFIGURATION & SETUP
+# ============================================================================
+
+load_dotenv()
+
+# Bot Configuration
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "123456789").split(",")))
+DATABASE_PATH = "bot_data.db"
+
+# Logging Setup
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# DATABASE SETUP & MANAGEMENT
+# ============================================================================
+
+class Database:
+    """SQLite Database Management Class"""
+    
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.init_db()
+    
+    def get_connection(self):
+        """Get database connection"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+    
+    def init_db(self):
+        """Initialize database tables"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Users table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                join_date TEXT,
+                invited_by INTEGER,
+                referrals_count INTEGER DEFAULT 0,
+                premium_status BOOLEAN DEFAULT 0,
+                streak INTEGER DEFAULT 0,
+                daily_bonus_date TEXT,
+                generated_bios_count INTEGER DEFAULT 0,
+                banned BOOLEAN DEFAULT 0,
+                daily_bonus_used BOOLEAN DEFAULT 0,
+                last_command_time REAL DEFAULT 0
+            )
+        ''')
+        
+        # Referrals table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER,
+                referred_id INTEGER,
+                date TEXT,
+                FOREIGN KEY(referrer_id) REFERENCES users(user_id),
+                FOREIGN KEY(referred_id) REFERENCES users(user_id)
+            )
+        ''')
+        
+        # Generated content table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS generated_content (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                content_type TEXT,
+                content TEXT,
+                date TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
+    
+    def user_exists(self, user_id: int) -> bool:
+        """Check if user exists"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    
+    def add_user(self, user_id: int, username: str, first_name: str, invited_by: Optional[int] = None):
+        """Add new user to database"""
+        if self.user_exists(user_id):
+            return
+        
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO users (user_id, username, first_name, join_date, invited_by)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, username, first_name, datetime.now().isoformat(), invited_by))
+        
+        if invited_by:
+            cursor.execute('''
+                UPDATE users SET referrals_count = referrals_count + 1
+                WHERE user_id = ?
+            ''', (invited_by,))
+            
+            cursor.execute('''
+                INSERT INTO referrals (referrer_id, referred_id, date)
+                VALUES (?, ?, ?)
+            ''', (invited_by, user_id, datetime.now().isoformat()))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_user(self, user_id: int) -> Optional[Dict]:
+        """Get user data"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    
+    def get_referral_link(self, user_id: int) -> str:
+        """Generate referral link for user"""
+        return f"https://t.me/YOUR_BOT_USERNAME?start={user_id}"
+    
+    def get_referrals_count(self, user_id: int) -> int:
+        """Get referral count for user"""
+        user = self.get_user(user_id)
+        return user['referrals_count'] if user else 0
+    
+    def get_top_inviters(self, limit: int = 10) -> List[Dict]:
+        """Get top inviters list"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT user_id, username, first_name, referrals_count 
+            FROM users 
+            WHERE banned = 0
+            ORDER BY referrals_count DESC 
+            LIMIT ?
+        ''', (limit,))
+        results = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in results]
+    
+    def get_rank_tier(self, referrals: int) -> Tuple[str, str]:
+        """Get rank tier based on referrals"""
+        if referrals >= 50:
+            return "🔱 LEGEND", "#FFD700"
+        elif referrals >= 25:
+            return "💎 DIAMOND", "#00FFFF"
+        elif referrals >= 10:
+            return "🏆 GOLD", "#FFD700"
+        elif referrals >= 5:
+            return "⭐ SILVER", "#C0C0C0"
+        elif referrals >= 2:
+            return "🥉 BRONZE", "#CD7F32"
+        else:
+            return "🌱 NOVICE", "#808080"
+    
+    def get_total_users(self) -> int:
+        """Get total users count"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        result = cursor.fetchone()[0]
+        conn.close()
+        return result
+    
+    def get_active_users(self, days: int = 7) -> int:
+        """Get active users in last N days"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        since = datetime.now() - timedelta(days=days)
+        cursor.execute('''
+            SELECT COUNT(*) FROM users 
+            WHERE join_date >= ?
+        ''', (since.isoformat(),))
+        result = cursor.fetchone()[0]
+        conn.close()
+        return result
+    
+    def give_premium(self, user_id: int, days: int = 30):
+        """Give premium status to user"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE users 
+            SET premium_status = 1
+            WHERE user_id = ?
+        ''', (user_id,))
+        conn.commit()
+        conn.close()
+    
+    def remove_premium(self, user_id: int):
+        """Remove premium status from user"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE users 
+            SET premium_status = 0
+            WHERE user_id = ?
+        ''', (user_id,))
+        conn.commit()
+        conn.close()
+    
+    def ban_user(self, user_id: int):
+        """Ban user"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE users 
+            SET banned = 1
+            WHERE user_id = ?
+        ''', (user_id,))
+        conn.commit()
+        conn.close()
+    
+    def unban_user(self, user_id: int):
+        """Unban user"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE users 
+            SET banned = 0
+            WHERE user_id = ?
+        ''', (user_id,))
+        conn.commit()
+        conn.close()
+    
+    def is_banned(self, user_id: int) -> bool:
+        """Check if user is banned"""
+        user = self.get_user(user_id)
+        return user['banned'] if user else False
+    
+    def save_generated_content(self, user_id: int, content_type: str, content: str):
+        """Save generated content"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO generated_content (user_id, content_type, content, date)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, content_type, content, datetime.now().isoformat()))
+        
+        cursor.execute('''
+            UPDATE users 
+            SET generated_bios_count = generated_bios_count + 1
+            WHERE user_id = ?
+        ''', (user_id,))
+        
+        conn.commit()
+        conn.close()
+    
+    def check_daily_bonus_available(self, user_id: int) -> bool:
+        """Check if daily bonus is available"""
+        user = self.get_user(user_id)
+        if not user:
+            return False
+        
+        if user['daily_bonus_date'] is None:
+            return True
+        
+        last_bonus = datetime.fromisoformat(user['daily_bonus_date'])
+        return (datetime.now() - last_bonus).days >= 1
+    
+    def claim_daily_bonus(self, user_id: int):
+        """Claim daily bonus"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE users 
+            SET daily_bonus_date = ?, streak = streak + 1
+            WHERE user_id = ?
+        ''', (datetime.now().isoformat(), user_id))
+        conn.commit()
+        conn.close()
+    
+    def reset_daily_bonus(self, user_id: int):
+        """Reset daily bonus streak if missed a day"""
+        user = self.get_user(user_id)
+        if user and user['daily_bonus_date']:
+            last_bonus = datetime.fromisoformat(user['daily_bonus_date'])
+            if (datetime.now() - last_bonus).days > 1:
+                conn = self.get_connection()
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE users 
+                    SET streak = 0
+                    WHERE user_id = ?
+                ''', (user_id,))
+                conn.commit()
+                conn.close()
+    
+    def get_bot_stats(self) -> Dict:
+        """Get bot statistics"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM users WHERE banned = 0")
+        total_users = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM users WHERE premium_status = 1")
+        premium_users = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM generated_content")
+        total_generated = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT SUM(referrals_count) FROM users")
+        total_referrals = cursor.fetchone()[0] or 0
+        
+        cursor.execute('''
+            SELECT COUNT(*) FROM users 
+            WHERE join_date >= datetime('now', '-7 days')
+        ''')
+        new_users_week = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        return {
+            'total_users': total_users,
+            'premium_users': premium_users,
+            'total_generated': total_generated,
+            'total_referrals': total_referrals,
+            'new_users_week': new_users_week
+        }
+
+# ============================================================================
+# BIO & CAPTION GENERATORS
+# ============================================================================
+
+class ContentGenerator:
+    """Generate premium bios, captions, and statuses"""
+    
+    # Telegram Bio Templates
+    TELEGRAM_BIOS = [
+        "✨ PREMIUM USER �� | 🌟 {mood} | 💎 EXCLUSIVE",
+        "🔥 {style} MODE ON 🔥 | ⭐ LIVING MY BEST LIFE",
+        "💫 {mood} & FABULOUS | 🎪 ENTERTAINER",
+        "🌈 {mood} VIBES | ✨ ALWAYS ON POINT",
+        "👑 {style} ENERGY | 💯 AUTHENTIC LIFE",
+        "🎯 {mood} LIFESTYLE | 🚀 GOING UP",
+        "💎 PREMIUM {style} | 🌟 NEVER BASIC",
+        "🔮 {mood} DESTINY | ✨ MANIFESTING SUCCESS",
+        "🎪 {style} CIRCUS | 🌟 ALWAYS TRENDING",
+        "👽 ALIEN ENERGY | 🎨 {mood} CREATION",
+    ]
+    
+    # Instagram Bio Templates
+    INSTAGRAM_BIOS = [
+        "📸 {mood} CONTENT CREATOR | 🌟 @username | 💎 LINK IN BIO",
+        "✨ {style} INFLUENCER | 📱 FOLLOW FOR VIBES | 🎯 ENGAGED",
+        "🎨 AESTHETIC {mood} | 📷 DAILY POSTS | 💫 DM FOR COLLABS",
+        "👑 {mood} ENERGY | 🌈 CREATING MAGIC | 📲 PARTNER: @business",
+        "💋 {style} DIVA | 📸 LIFESTYLE | 🎀 SWIPE UP IN STORIES",
+        "🚀 {mood} ENTREPRENEUR | 💼 BUILDING EMPIRE | 📧 CONTACT BIO",
+        "🎭 ARTIST & {style} | 🖼️ PORTFOLIO | 📸 CAPTURING MOMENTS",
+        "✨ {mood} GOALS | 🌟 INSPIRED | 📖 READ MY CAPTIONS",
+        "💎 LUXURY {style} | 👗 FASHION | 👠 STYLE ICON",
+        "🔥 HOT {mood} | 🌶️ SPICY CONTENT | 😏 NOT FOR EVERYONE",
+    ]
+    
+    # TikTok Bio Templates
+    TIKTOK_BIOS = [
+        "🎥 {mood} CREATOR | 📲 FYP MATERIAL | 💫 FUNNY & RELATABLE",
+        "✨ {style} VIBES | 🎬 DAILY VIDEOS | 🎵 TRENDING SOUNDS",
+        "🔥 {mood} ENERGY | 💯 100% ENTERTAINMENT | 🎪 WATCH THIS",
+        "📱 SCROLL FOR LAUGHS | {style} HUMOR | 🤣 TAG YOUR FRIENDS",
+        "🎨 CONTENT JUNKIE | {mood} EDITS | ✨ AESTHETIC FLOW",
+        "💋 {style} & SASS | 💃 DANCING QUEEN | 🎉 PARTY 24/7",
+        "🚀 RISING STAR | {mood} TRENDS | 🌟 2M VIEWS GOAL",
+        "👽 ALIEN FROM {style} PLANET | 🌌 OUT OF THIS WORLD",
+        "🎭 {mood} ACTOR | 🎬 CINEMATIC VIDEOS | 📹 FOLLOW FOR GOLD",
+        "💎 LUXURY {style} | 👑 VIP CONTENT | 🎀 ELITE CREATIONS",
+    ]
+    
+    # Dark Vibe Bios
+    DARK_VIBE_BIOS = [
+        "🌑 DARKNESS CALLS | 💀 INTO THE VOID | 🖤 NO LIGHT HERE",
+        "⚫ SHADOW WALKER | 🌙 NIGHT CREATURE | 💀 ETERNAL NIGHT",
+        "🖤 HEART OF DARKNESS | ☠️ DANGER ZONE | 🌑 STAY AWAY",
+        "💀 DEATH WISHES | 🔥 BURN IT DOWN | ⚡ CHAOS RULES",
+        "🌑 NOCTURNAL SOUL | 🦇 VAMPIRE VIBES | 🖤 DARK & DEEP",
+        "⛓️ CHAINED TO DARKNESS | 💀 REAPER MODE | 🌑 ETERNAL NIGHT",
+        "🔮 CURSED ENERGY | ☠️ DOOM APPROACHES | 🖤 DARK ARTS",
+        "🌙 MIDNIGHT BEAST | 💀 HORROR SHOW | 🔥 BURNING HELL",
+        "🖤 SOUL OF SHADOWS | ☠️ DEATH'S EMBRACE | 🌑 LOST FOREVER",
+        "⚫ ABYSS DWELLER | 💀 GRIM REAPER | 🔗 BOUND BY DARKNESS",
+    ]
+    
+    # Rich/Luxury Bios
+    RICH_LUXURY_BIOS = [
+        "💎 LUXURY LIFESTYLE | 👑 EXCLUSIVE ACCESS | 💰 MAKING MOVES",
+        "💵 MONEY MOVES | 🏆 WINNING ALWAYS | 💎 PREMIUM VIBES",
+        "🏰 LIVING LIKE ROYALTY | 👑 DIAMOND STANDARD | 💰 STACKED",
+        "💳 PLATINUM CARD | 🛍️ DESIGNER ONLY | 💎 VIP TREATMENT",
+        "🌟 LUXURY ELITE | 💼 BUSINESS TYCOON | 💎 RARE GEMS",
+        "👑 CROWN WEARER | 💰 GENERATIONAL WEALTH | 🏆 ALWAYS FIRST",
+        "💎 PRECIOUS STONES | 💵 CASH FLOW | 🛸 LUXURY SPACESHIP",
+        "🏅 EXCELLENCE | 💎 DIAMONDS ARE FOREVER | 👑 RULER",
+        "💰 STACKS ON STACKS | 🛍️ LUXURY SHOPPING | 💎 PRICELESS",
+        "🌟 SHINING BRIGHT | 💎 UNTOUCHABLE | 👑 LEGENDARY STATUS",
+    ]
+    
+    # Love Bios
+    LOVE_BIOS = [
+        "💕 LOVE IN THE AIR | 💑 SOUL CONNECTED | 💝 FOREVER YOURS",
+        "❤️ HEART FULL OF LOVE | 💕 PURE EMOTION | 🌹 ROMANTIC VIBES",
+        "💏 COUPLE GOALS | 💕 LOVE STORY | 💑 SOULMATES",
+        "🌹 ETERNAL LOVE | 💕 FOREVER & ALWAYS | 💞 HEART BEATS",
+        "💖 LOVE MACHINE | 💕 CUPID'S ARROW | 💘 TRUE LOVE",
+        "💗 PASSION PLAY | 💕 LOVE ZONE | 💞 ENDLESS AFFECTION",
+        "❤️��🔥 BURNING LOVE | 💕 FLAMES OF PASSION | 💞 ETERNAL BOND",
+        "💕 LOVE STORY | 💑 HAPPY EVER AFTER | 🌹 ROMANCE MODE",
+        "💗 HEART THROB | 💕 LOVE DOCTOR | 💞 HEALING HEARTS",
+        "🌹 LOVE GARDENS | 💕 BLOOM & GROW | 💖 PURE CONNECTION",
+    ]
+    
+    # Sad/Dark Emotional Bios
+    EMOTIONAL_BIOS = [
+        "😢 BROKEN HEART | 💔 PAIN IS REAL | 🖤 EMPTY INSIDE",
+        "😭 TEARS FLOWING | 💔 HEART SHATTERED | 🌧️ RAINY DAYS",
+        "🖤 LOST SOUL | 💔 WOUNDED SPIRIT | 😔 FOREVER SAD",
+        "💔 HEARTBREAK CLUB | 😢 CRY ME A RIVER | 🌙 LONELY NIGHTS",
+        "😞 EMOTIONALLY DRAINED | 💔 BROKEN BEYOND REPAIR | 🖤 VOID",
+        "😭 PAIN GANG | 💔 SUFFERING QUIETLY | 🌧️ DROWNING",
+        "🖤 NUMB INSIDE | 💔 HEARTS BREAK | 😔 LOST IN DARKNESS",
+        "😢 FOREVER LONELY | 💔 EMPTY SHELL | 🌑 NEVER HEALING",
+        "💔 LOVE KILLED ME | 😭 TEARS NEVER DRY | 🖤 GONE",
+        "😔 GOODBYE HAPPINESS | 💔 BROKEN DREAMS | 🌧️ ENDLESS RAIN",
+    ]
+    
+    # Mafia/Tough Vibes
+    MAFIA_VIBES = [
+        "🔫 DON'T MESS WITH ME | 👿 MAFIA LIFE | 💣 TROUBLE",
+        "⚰️ DEATH DEALER | 🔪 STREET KING | 👑 RESPECT ME",
+        "💀 GRIM BUSINESS | 🚨 DANGER ZONE | 🔫 ARMED & READY",
+        "👿 RUTHLESS OPERATOR | 💼 DIRTY DEALINGS | 🔒 NO MERCY",
+        "🔗 CHAINED TO CRIME | 🔫 READY FOR WAR | 💪 UNSTOPPABLE",
+        "⛓️ MOB BOSS | 👑 EMPIRE RULER | 🚫 CROSS AT YOUR PERIL",
+        "💀 DEATH WISH | 🔫 TRIGGER HAPPY | 👿 NO REMORSE",
+        "🚨 CRIMINAL MASTERMIND | 💣 EXPLOSIVE PERSONALITY | 🔥 CHAOS",
+        "⚰️ GRAVEYARD GUARDIAN | 🔪 BLADE SHARP | 👑 UNTOUCHABLE",
+        "🔫 BULLET PROOF | 💪 MUSCLE POWER | 👿 PURE EVIL",
+    ]
+    
+    # Student Bios
+    STUDENT_BIOS = [
+        "📚 STUDENT LIFE | 🎓 GRINDING FOR DREAMS | 🏫 CAMPUS VIBES",
+        "✏️ BOOK LOVER | 📖 STUDY MODE ON | 🎯 FUTURE BRIGHT",
+        "🎓 CLASS CLOWN | 📚 SOMETIMES STUDYING | 🎉 PARTY HARD",
+        "📝 NOTES TAKER | 📚 KNOWLEDGE SEEKER | 🧠 BIG BRAIN",
+        "🏫 SCHOOL DAYS | ✏️ HOMEWORK WARRIOR | 🎓 FUTURE LEADER",
+        "📖 BOOKWORM | 🎓 INTELLIGENT HUMAN | 🧠 QUICK LEARNER",
+        "✏️ STUDENT OF LIFE | 📚 ALWAYS LEARNING | 🎯 AMBITION",
+        "🎓 GRADUATE GOALS | 📚 FINAL SEMESTER | 🎉 FREE AT LAST",
+        "📝 EXAM SEASON | 🏫 COFFEE POWERED | 💪 ALMOST THERE",
+        "📖 FOREVER STUDENT | 🧠 CURIOUS MIND | 🎓 NEVER STOP",
+    ]
+    
+    # Business Bios
+    BUSINESS_BIOS = [
+        "💼 ENTREPRENEUR | 🚀 BUILDING EMPIRE | 💰 SUCCESS DRIVEN",
+        "📊 BUSINESS OWNER | 💎 PREMIUM SERVICE | 🎯 RESULTS MATTER",
+        "👔 CORPORATE CLIMBING | 💼 CEO ENERGY | 📈 ALWAYS GROWING",
+        "🏢 OFFICE WARRIOR | 📱 DIGITAL NOMAD | 💻 TECH SAVVY",
+        "💼 STARTUP FOUNDER | 🚀 INNOVATION | 💡 BIG IDEAS",
+        "📊 DATA DRIVEN | 💰 PROFIT FOCUSED | 🎯 STRATEGIC MIND",
+        "👨‍💼 BUSINESS ANALYST | 💼 FINANCE EXPERT | 📈 GROWING WEALTH",
+        "🏆 INDUSTRY LEADER | 💎 TRUSTED BRAND | 🌟 MARKET DOMINATOR",
+        "💻 DIGITAL EXPERT | 📱 APP DEVELOPER | 🚀 TECH INNOVATOR",
+        "💼 SALES CHAMPION | 🎯 CLOSING DEALS | 💰 COMMISSION KING",
+    ]
+    
+    # Football Fan Bios
+    FOOTBALL_BIOS = [
+        "⚽ FOOTBALL FANATIC | ⚽ FOREVER RED | 🏆 PASSION RUNS DEEP",
+        "🏟️ STADIUM WARRIOR | ⚽ GOAL MACHINE | 👟 BEAUTIFUL GAME",
+        "⚽ STRIKER LIFE | 🥅 NET GOALS | 👑 FOOTBALL KING",
+        "🏟️ MATCH DAY ENERGY | ⚽ BREATHE FOOTBALL | 💪 UNSTOPPABLE",
+        "👟 BOOT GAME STRONG | ⚽ SKILL MOVES | 🎯 ACCURATE SHOOTS",
+        "⚽ GOALKEEPER MINDSET | 🥅 DEFENSIVE GENIUS | 🛡️ UNBEATABLE",
+        "🏆 TROPHY HUNTER | ⚽ CHAMPIONSHIP VIBES | 👑 LEGEND STATUS",
+        "⚽ ACADEMY PRODUCT | 👟 RISING STAR | 🌟 FUTURE PRO",
+        "🏟️ ULTRAS FOREVER | ⚽ DIE HARD FAN | 💯 LOYALTY STRONG",
+        "⚽ MIDFIELDER ARTIST | 🎨 PLAYMAKER | 👑 ORCHESTRATOR",
+    ]
+    
+    # Car Lover Bios
+    CAR_LOVER_BIOS = [
+        "🏎️ CAR LOVER | 🔧 MECHANIC SOUL | ⚙️ ENGINE ROARING",
+        "🚗 SPEED DEMON | 🏁 RACING VIBES | 💨 FAST & FURIOUS",
+        "🏎️ HORSEPOWER | 🔥 TURBO CHARGED | ⚡ LIGHTNING FAST",
+        "🚙 CAR ENTHUSIAST | 🛞 WHEEL MASTER | 🎨 CUSTOM BUILD",
+        "🏁 TRACK DAY | 🏎️ APEX PREDATOR | 🚀 LAUNCHING MODE",
+        "🚗 GARAGE KING | 🔧 RESTORATION ARTIST | 💎 CLASSICS",
+        "⚙️ ENGINE HEAD | 🏎️ PERFORMANCE TUNED | 💪 POWER DELIVERY",
+        "🛞 TIRE HUGGING | 🏁 DRIFTING MASTER | 😎 CONTROL FREAK",
+        "🚙 CAR COMMUNITY | 🏎️ BROTHERHOOD | 👑 AUTOMOTIVE KING",
+        "💨 NEED FOR SPEED | 🏁 RACING LINE | 🚀 NO BRAKES",
+    ]
+    
+    # Motivational Status Templates
+    MOTIVATIONAL_STATUS = [
+        "💪 GRIND NEVER STOPS | 🚀 DREAM NEVER DIES | 🏆 WINNING TIME",
+        "✨ YOU ARE CAPABLE | 🌟 BELIEVE IN YOURSELF | 💎 SHINE BRIGHT",
+        "🔥 NO LIMITS | 💯 HUSTLE MODE | 🎯 GOALS INCOMING",
+        "😤 NEVER GIVE UP | 💪 PUSH HARDER | 🏁 FINISH LINE WAITING",
+        "🌟 YOUR TIME NOW | ✨ MANIFEST SUCCESS | 💫 DESTINY CALLING",
+        "🚀 REACH FOR STARS | 🎯 STAY FOCUSED | 💎 PREMIUM MINDSET",
+        "💪 PAIN IS TEMPORARY | 🏆 GLORY IS FOREVER | ⚡ KEEP GOING",
+        "🔥 BEAT YOUR LIMITS | 💯 EXCELLENCE ONLY | 👑 KING MENTALITY",
+        "✨ YOU GOT THIS | 💪 STRENGTH WITHIN | 🌟 UNSTOPPABLE FORCE",
+        "🎯 MISSION FOCUSED | 🚀 VELOCITY UP | 💎 DREAMS INTO REALITY",
+    ]
+    
+    # Stylish Text Generators
+    STYLISH_FONTS = {
+        "1️⃣": lambda x: "𝟙 " + x + " 𝟙",
+        "2️⃣": lambda x: "𝘍𝘈𝘋𝘌𝘋: " + x,
+        "3️⃣": lambda x: "ᴀ ɪ ʀ: " + x,
+        "4️⃣": lambda x: "G̴L̴I̴T̴C̴H̴: " + x,
+        "5️⃣": lambda x: "꧁ " + x + " ꧂",
+    }
+    
+    # Emoji Rich Patterns
+    EMOJI_PATTERNS = [
+        "✨ {text} ✨",
+        "💫 {text} 💫",
+        "🌟 {text} 🌟",
+        "💎 {text} 💎",
+        "👑 {text} 👑",
+        "🔥 {text} 🔥",
+        "⭐ {text} ⭐",
+        "🎯 {text} 🎯",
+        "💪 {text} 💪",
+        "🚀 {text} 🚀",
+    ]
+    
+    @staticmethod
+    def generate_telegram_bio() -> str:
+        """Generate random Telegram bio"""
+        template = random.choice(ContentGenerator.TELEGRAM_BIOS)
+        mood = random.choice(["AMAZING", "AWESOME", "FANTASTIC", "INCREDIBLE", "EPIC"])
+        style = random.choice(["ELITE", "PREMIUM", "LUXURY", "VIP", "EXCLUSIVE"])
+        return template.format(mood=mood, style=style)
+    
+    @staticmethod
+    def generate_instagram_bio() -> str:
+        """Generate random Instagram bio"""
+        template = random.choice(ContentGenerator.INSTAGRAM_BIOS)
+        mood = random.choice(["CREATIVE", "ARTISTIC", "FABULOUS", "STUNNING", "BEAUTIFUL"])
+        style = random.choice(["CONTENT", "LIFESTYLE", "FASHION", "BEAUTY", "TRAVEL"])
+        return template.format(mood=mood, style=style)
+    
+    @staticmethod
+    def generate_tiktok_bio() -> str:
+        """Generate random TikTok bio"""
+        template = random.choice(ContentGenerator.TIKTOK_BIOS)
+        mood = random.choice(["HILARIOUS", "TRENDING", "VIRAL", "FIRE", "SPICY"])
+        style = random.choice(["MEME", "PRANK", "DANCE", "COMEDY", "CHALLENGE"])
+        return template.format(mood=mood, style=style)
+    
+    @staticmethod
+    def generate_dark_bio() -> str:
+        """Generate dark vibe bio"""
+        return random.choice(ContentGenerator.DARK_VIBE_BIOS)
+    
+    @staticmethod
+    def generate_luxury_bio() -> str:
+        """Generate luxury/rich bio"""
+        return random.choice(ContentGenerator.RICH_LUXURY_BIOS)
+    
+    @staticmethod
+    def generate_love_bio() -> str:
+        """Generate love bio"""
+        return random.choice(ContentGenerator.LOVE_BIOS)
+    
+    @staticmethod
+    def generate_sad_bio() -> str:
+        """Generate sad/emotional bio"""
+        return random.choice(ContentGenerator.EMOTIONAL_BIOS)
+    
+    @staticmethod
+    def generate_mafia_bio() -> str:
+        """Generate mafia vibes bio"""
+        return random.choice(ContentGenerator.MAFIA_VIBES)
+    
+    @staticmethod
+    def generate_student_bio() -> str:
+        """Generate student bio"""
+        return random.choice(ContentGenerator.STUDENT_BIOS)
+    
+    @staticmethod
+    def generate_business_bio() -> str:
+        """Generate business bio"""
+        return random.choice(ContentGenerator.BUSINESS_BIOS)
+    
+    @staticmethod
+    def generate_football_bio() -> str:
+        """Generate football fan bio"""
+        return random.choice(ContentGenerator.FOOTBALL_BIOS)
+    
+    @staticmethod
+    def generate_car_bio() -> str:
+        """Generate car lover bio"""
+        return random.choice(ContentGenerator.CAR_LOVER_BIOS)
+    
+    @staticmethod
+    def generate_motivational() -> str:
+        """Generate motivational status"""
+        return random.choice(ContentGenerator.MOTIVATIONAL_STATUS)
+    
+    @staticmethod
+    def generate_username() -> str:
+        """Generate stylish username"""
+        adjectives = ["Cool", "Prime", "Elite", "Cyber", "Neon", "Ghost", "Shadow", "Phoenix", "Titan", "Apex"]
+        nouns = ["Player", "Master", "Beast", "King", "Knight", "Ninja", "Wizard", "Sage", "Lord", "Legend"]
+        number = random.randint(11, 999)
+        
+        template = random.choice([
+            f"{random.choice(adjectives)}{random.choice(nouns)}{number}",
+            f"{random.choice(adjectives)}_{random.choice(nouns)}_{number}",
+            f"_{random.choice(adjectives)}{number}_{random.choice(nouns)}_",
+            f"x{random.choice(adjectives)}{number}x",
+            f"[{random.choice(adjectives)}]{number}",
+        ])
+        return template
+    
+    @staticmethod
+    def generate_stylish_text(text: str, style_num: int = 0) -> str:
+        """Generate stylish text"""
+        styles = [
+            f"✨ {text} ✨",
+            f"★ {text} ★",
+            f"═ {text} ═",
+            f"◇ {text} ◇",
+            f"◆ {text} ◆",
+            f"► {text} ◄",
+            f"❰ {text} ❱",
+            f"【 {text} 】",
+            f"•°•°•{text}°•°•",
+            f"︻┳═一 {text} 一═┳︻",
+        ]
+        return random.choice(styles) if style_num == 0 else styles[style_num % len(styles)]
+    
+    @staticmethod
+    def generate_reel_caption() -> str:
+        """Generate Instagram Reel caption"""
+        captions = [
+            "🔥 This one hit different 🔥\n💯 Double tap if you agree!\n📲 Follow for more 🎬",
+            "✨ Vibe check: PASSED ✨\n😍 Tag someone who needs to see this\n🎥 New video daily!",
+            "💫 That moment... 💫\n👀 Wait for it 👀\n🚀 Slide into DMs!",
+            "🎯 POV: You're about to laugh 🎯\n😂 Who else? 📱",
+            "🔔 Turn on notifications! 🔔\n🎬 Best content coming soon\n💎 VIP viewers only!",
+        ]
+        return random.choice(captions)
+    
+    @staticmethod
+    def generate_story_caption() -> str:
+        """Generate Instagram Story caption"""
+        captions = [
+            "👆 Swipe up to see more",
+            "📲 Check my latest post",
+            "💬 What do you think?",
+            "🔗 Link in bio",
+            "⏰ 24 hours only",
+            "❤️ Rate this 1-10",
+            "🎯 Agree or disagree?",
+            "📸 Behind the scenes",
+        ]
+        return random.choice(captions)
+
+# ============================================================================
+# FSM STATES
+# ============================================================================
+
+class GeneratorStates(StatesGroup):
+    """States for bio generation"""
+    choosing_platform = State()
+    choosing_style = State()
+    generating = State()
+    admin_command = State()
+
+class AdminStates(StatesGroup):
+    """States for admin panel"""
+    waiting_message = State()
+    waiting_broadcast_type = State()
+    broadcast_processing = State()
+    admin_managing = State()
+
+# ============================================================================
+# KEYBOARD BUILDERS
+# ============================================================================
+
+def get_main_keyboard(referrals: int) -> ReplyKeyboardMarkup:
+    """Build main menu keyboard"""
+    keyboard = [
+        [KeyboardButton(text="🎨 BIO GENERATOR"), KeyboardButton(text="📸 CAPTIONS")],
+        [KeyboardButton(text="🎭 USERNAME"), KeyboardButton(text="✨ STYLISH TEXT")],
+        [KeyboardButton(text="👥 REFERRALS"), KeyboardButton(text="📊 PROFILE")],
+        [KeyboardButton(text="🏆 LEADERBOARD"), KeyboardButton(text="🎁 DAILY BONUS")],
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def get_bio_type_keyboard() -> InlineKeyboardMarkup:
+    """Build bio platform selection"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Telegram", callback_data="bio_telegram")],
+        [InlineKeyboardButton(text="📸 Instagram", callback_data="bio_instagram")],
+        [InlineKeyboardButton(text="🎥 TikTok", callback_data="bio_tiktok")],
+        [InlineKeyboardButton(text="🎯 Multi Platform", callback_data="bio_multi")],
+    ])
+    return keyboard
+
+def get_bio_style_keyboard(premium: bool = False) -> InlineKeyboardMarkup:
+    """Build bio style selection"""
+    buttons = []
+    
+    free_styles = [
+        ("📱 Telegram Bio", "gen_tg"),
+        ("📸 Instagram Bio", "gen_ig"),
+        ("🎥 TikTok Bio", "gen_tt"),
+    ]
+    
+    for text, data in free_styles:
+        buttons.append([InlineKeyboardButton(text=text, callback_data=data)])
+    
+    # Premium styles
+    if premium:
+        premium_styles = [
+            ("🌑 Dark Vibe", "gen_dark"),
+            ("💎 Luxury Vibes", "gen_luxury"),
+            ("😢 Emotional", "gen_sad"),
+            ("❤️ Love Bio", "gen_love"),
+            ("👿 Mafia Style", "gen_mafia"),
+        ]
+        for text, data in premium_styles:
+            buttons.append([InlineKeyboardButton(text=text, callback_data=data)])
+    else:
+        # Lock message for premium styles
+        premium_styles = [
+            ("🌑 Dark Vibe 🔒", "locked_dark"),
+            ("💎 Luxury Vibes 🔒", "locked_luxury"),
+            ("😢 Emotional 🔒", "locked_sad"),
+            ("❤️ Love Bio 🔒", "locked_love"),
+            ("👿 Mafia Style 🔒", "locked_mafia"),
+        ]
+        for text, data in premium_styles:
+            buttons.append([InlineKeyboardButton(text=text, callback_data=data)])
+    
+    buttons.append([InlineKeyboardButton(text="⬅️ BACK", callback_data="back_menu")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_special_bio_keyboard(premium: bool = False) -> InlineKeyboardMarkup:
+    """Build special bio categories keyboard"""
+    buttons = []
+    
+    special_bios = [
+        ("📚 Student Bio", "gen_student"),
+        ("💼 Business Bio", "gen_business"),
+        ("⚽ Football Fan", "gen_football"),
+        ("🏎️ Car Lover", "gen_car"),
+    ]
+    
+    for text, data in special_bios:
+        buttons.append([InlineKeyboardButton(text=text, callback_data=data)])
+    
+    if premium:
+        buttons.append([InlineKeyboardButton(text="❤️ COUPLE BIO", callback_data="gen_couple")])
+    else:
+        buttons.append([InlineKeyboardButton(text="❤️ COUPLE BIO 🔒", callback_data="locked_couple")])
+    
+    buttons.append([InlineKeyboardButton(text="⬅️ BACK", callback_data="back_menu")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_caption_keyboard(premium: bool = False) -> InlineKeyboardMarkup:
+    """Build caption generation keyboard"""
+    buttons = [
+        [InlineKeyboardButton(text="📹 Reel Caption", callback_data="gen_reel")],
+        [InlineKeyboardButton(text="📸 Story Caption", callback_data="gen_story")],
+    ]
+    
+    if premium:
+        buttons.append([InlineKeyboardButton(text="💬 Emoji Rich Caption", callback_data="gen_emoji")])
+    else:
+        buttons.append([InlineKeyboardButton(text="💬 Emoji Rich Caption 🔒", callback_data="locked_emoji")])
+    
+    buttons.append([InlineKeyboardButton(text="⬅️ BACK", callback_data="back_menu")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_admin_keyboard() -> ReplyKeyboardMarkup:
+    """Build admin panel keyboard"""
+    keyboard = [
+        [KeyboardButton(text="👥 Total Users"), KeyboardButton(text="📊 Statistics")],
+        [KeyboardButton(text="📢 Broadcast"), KeyboardButton(text="🏆 Top Inviters")],
+        [KeyboardButton(text="👑 Give Premium"), KeyboardButton(text="⛔ Ban User")],
+        [KeyboardButton(text="🎁 Remove Premium"), KeyboardButton(text="✅ Unban User")],
+        [KeyboardButton(text="📤 Export Users"), KeyboardButton(text="🔙 EXIT")],
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+# ============================================================================
+# MIDDLEWARE & FILTERS
+# ============================================================================
+
+class AntiSpamMiddleware:
+    """Anti-spam middleware to prevent command spamming"""
+    
+    def __init__(self, time_limit: float = 0.5):
+        self.time_limit = time_limit
+        self.last_commands = {}
+    
+    async def __call__(self, handler, event, data):
+        from time import time
+        
+        if not isinstance(event, Message):
+            return await handler(event, data)
+        
+        user_id = event.from_user.id
+        current_time = time()
+        
+        if user_id in self.last_commands:
+            if current_time - self.last_commands[user_id] < self.time_limit:
+                return
+        
+        self.last_commands[user_id] = current_time
+        return await handler(event, data)
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def get_referral_progress_text(referrals: int) -> str:
+    """Get viral referral progress text"""
+    milestones = {
+        0: "👶 NEW MEMBER | Invite 2 friends to unlock ELITE BIOS",
+        1: "🌱 GROWING | 1/2 invites. Just 1 more for premium! 🚀",
+        2: "🎖️ BRONZE MEMBER | Unlocked DARK VIBE! Invite 3 more for SILVER 🔥",
+        3: "📈 3/5 | SILVER is close! Your friends love this feature 💎",
+        4: "⭐ 4/5 | Almost there! 1 more invite 🎯",
+        5: "🏆 SILVER ELITE | Unlocked LUXURY VIBES! Invite 5 more 👑",
+        10: "💎 GOLD ELITE | You're LEGENDARY! Keep inviting 🚀",
+        25: "🔱 DIAMOND ELITE | TOP TIER MEMBER! Share with everyone 👑",
+        50: "👑 LEGEND STATUS | You're immortal! Highest honor 🌟"
+    }
+    
+    for threshold in sorted(milestones.keys(), reverse=True):
+        if referrals >= threshold:
+            return milestones[threshold]
+    
+    return milestones[0]
+
+def get_lock_message(style: str) -> str:
+    """Get manipulative lock message"""
+    messages = {
+        "dark": "🌑 ELITE DARK VIBE BIOS 🌑\n\n⛔ LOCKED - VIP ONLY\n\n✨ Your friends already unlocked this!\n💎 Invite 2+ friends to access PREMIUM styles\n\n📲 Tap to see your referral link 👇",
+        "luxury": "💎 LUXURY & RICH VIBES 💎\n\n⛔ LOCKED - EXCLUSIVE ONLY\n\n🔥 Trending NOW! Hot trend!\n👑 Only 2% of users have access\n\n🎯 Invite 2+ friends to unlock 👇",
+        "love": "❤️ ROMANTIC & COUPLE BIOS ❤️\n\n⛔ LOCKED - EXCLUSIVE\n\n👫 Make your partner jealous!\n✨ Premium feature - limited time only\n\n💕 Invite 2+ friends to unlock 👇",
+        "sad": "😢 EMOTIONAL VIBES 😢\n\n⛔ LOCKED - VIP ONLY\n\n💔 Deep & emotional bios\n🌙 Express your soul\n\n🎯 Invite 2+ friends to get access 👇",
+        "mafia": "👿 MAFIA & TOUGH VIBES 👿\n\n⛔ LOCKED - ELITE ONLY\n\n🔫 Danger Zone Content!\n⚰️ For the bold ones\n\n💪 Invite 2+ friends for access 👇",
+        "couple": "👫 COUPLE GOALS 👫\n\n⛔ LOCKED - EXCLUSIVE\n\n💑 Create magic with your partner!\n🌹 Only for premium members\n\n💕 Invite 2+ friends to unlock 👇",
+        "emoji": "💬 EMOJI RICH CAPTIONS 💬\n\n⛔ LOCKED - PREMIUM\n\n✨ Express yourself with emojis!\n🎨 Artist's choice - limited time\n\n🚀 Invite 2+ friends to access 👇",
+    }
+    
+    return messages.get(style, "⛔ This feature is locked!\n\n💎 Invite 2+ friends to unlock premium content")
+
+# ============================================================================
+# BOT HANDLERS
+# ============================================================================
+
+async def setup_default_commands(bot: Bot):
+    """Setup default bot commands"""
+    commands = [
+        BotCommand(command="start", description="🚀 Start the bot"),
+        BotCommand(command="help", description="📖 Get help"),
+        BotCommand(command="profile", description="👤 Your profile"),
+        BotCommand(command="referral", description="👥 Referral link"),
+        BotCommand(command="leaderboard", description="🏆 Top inviters"),
+        BotCommand(command="admin", description="🔑 Admin panel (ADMINS ONLY)"),
+    ]
+    await bot.set_my_commands(commands, BotCommandScopeDefault())
+    logger.info("Default commands set successfully")
+
+async def cmd_start(message: Message, state: FSMContext):
+    """Handle /start command"""
+    user_id = message.from_user.id
+    username = message.from_user.username or "Unknown"
+    first_name = message.from_user.first_name or "User"
+    
+    # Check if user is banned
+    if db.is_banned(user_id):
+        await message.reply("⛔ You have been banned from using this bot.")
+        return
+    
+    # Get referral from start parameter
+    invited_by = None
+    args = message.text.split()
+    
+    if len(args) > 1 and args[1].isdigit():
+        invited_by = int(args[1])
+        if not db.user_exists(invited_by):
+            invited_by = None
+    
+    # Add user to database
+    if not db.user_exists(user_id):
+        db.add_user(user_id, username, first_name, invited_by)
+        logger.info(f"New user added: {user_id} ({first_name})")
+    
+    # Send welcome message
+    welcome_text = f"""
+🎉 {bold('WELCOME TO PREMIUM BIO GENERATOR')} 🎉
+
+{italic('Generate viral bios, captions, and statuses for:')}
+✅ Telegram
+✅ Instagram  
+✅ TikTok
+✅ And more!
+
+🚀 {bold('START EARNING PREMIUM:')}
+👥 Invite friends → Unlock elite styles
+💎 More invites → Higher rank
+👑 Become LEGEND!
+
+{get_referral_progress_text(db.get_referrals_count(user_id))}
+
+💪 Ready? Let's go!
+"""
+    
+    await message.answer(
+        welcome_text,
+        reply_markup=get_main_keyboard(db.get_referrals_count(user_id)),
+        parse_mode=ParseMode.HTML
+    )
+    
+    await state.clear()
+
+async def cmd_help(message: Message):
+    """Handle /help command"""
+    help_text = """
+🆘 {bold('HELP & INFORMATION')} 🆘
+
+{bold('📖 HOW TO USE:')}
+1️⃣ Choose a category (Bio, Captions, etc)
+2️⃣ Pick a style 
+3️⃣ Get unlimited variations!
+
+{bold('🔓 UNLOCK PREMIUM:')}
+• Invite 2 friends → Dark Vibe, Luxury
+• Invite 5 friends → Silver Status
+• Invite 10 friends → Gold Status
+• Invite 25+ friends → Diamond/Legend
+
+{bold('🎁 FEATURES:')}
+✅ Telegram/Instagram/TikTok bios
+✅ Bio styles: Dark, Luxury, Love, Sad, Mafia
+✅ Captions: Reel, Story, Emoji-rich
+✅ Username & Text generators
+✅ Daily bonus system
+✅ Streak tracking
+
+{bold('⚡ TIPS:')}
+💡 Check leaderboard for top inviters
+💡 Claim daily bonus for rewards
+💡 Share referral link everywhere!
+
+Need more help? Ask @support
+""".format(bold=bold)
+    
+    await message.answer(help_text, parse_mode=ParseMode.HTML)
+
+async def cmd_profile(message: Message):
+    """Show user profile"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await message.reply("❌ Profile not found. Use /start first.")
+        return
+    
+    rank_tier, _ = db.get_rank_tier(user['referrals_count'])
+    premium_status = "✅ PREMIUM MEMBER" if user['premium_status'] else "⭕ FREE MEMBER"
+    
+    profile_text = f"""
+👤 {bold('YOUR PROFILE')} 👤
+
+{bold('Personal Info:')}
+👤 Name: {user['first_name']}
+🆔 ID: {user['user_id']}
+📅 Joined: {user['join_date'][:10]}
+
+{bold('Statistics:')}
+👥 Referrals: {user['referrals_count']}
+🏆 Rank: {rank_tier}
+📊 Status: {premium_status}
+🎯 Bios Generated: {user['generated_bios_count']}
+🔥 Streak: {user['streak']} days
+
+{bold('Bonuses:')}
+🎁 Daily Bonus Available: {'✅ YES' if db.check_daily_bonus_available(user_id) else '⏰ Tomorrow'}
+🔥 Current Streak: {user['streak']} 🔥
+"""
+    
+    await message.answer(profile_text, parse_mode=ParseMode.HTML)
+
+async def cmd_referral(message: Message):
+    """Show referral information"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    referrals_count = user['referrals_count'] if user else 0
+    
+    referral_link = db.get_referral_link(user_id)
+    rank_tier, _ = db.get_rank_tier(referrals_count)
+    
+    ref_text = f"""
+👥 {bold('YOUR REFERRAL PROGRAM')} 👥
+
+{bold('Referral Link:')}
+`{referral_link}`
+
+{bold('Current Status:')}
+👥 Total Invites: {referrals_count}
+🏆 Rank: {rank_tier}
+{get_referral_progress_text(referrals_count)}
+
+{bold('🎁 UNLOCK SYSTEM:')}
+2 invites → 🌑 Dark Vibe Bios
+5 invites → 💎 Luxury Vibes
+10 invites → 🏆 Gold Status
+25 invites → 👑 Diamond Status
+50+ invites → 🔱 LEGEND STATUS
+
+{bold('💰 FUTURE REWARDS:')}
+🎉 Premium features
+💎 Exclusive content
+🌟 VIP treatment
+👑 Lifetime perks
+
+📤 Share your link now!
+"""
+    
+    # Copy button
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Copy Link", callback_data="copy_ref")],
+        [InlineKeyboardButton(text="📤 Share Link", callback_data="share_ref")],
+    ])
+    
+    await message.answer(ref_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_leaderboard(message: Message):
+    """Show leaderboard"""
+    top_inviters = db.get_top_inviters(10)
+    
+    leaderboard_text = "🏆 " + bold("TOP INVITERS LEADERBOARD") + " 🏆\n\n"
+    
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    
+    for idx, user in enumerate(top_inviters):
+        rank_tier, _ = db.get_rank_tier(user['referrals_count'])
+        leaderboard_text += f"{medals[idx]} {user['first_name']} - {user['referrals_count']} 👥 {rank_tier}\n"
+    
+    leaderboard_text += f"\n💡 You can be here! Invite friends & climb up! 🚀"
+    
+    await message.answer(leaderboard_text, parse_mode=ParseMode.HTML)
+
+async def cmd_daily_bonus(message: Message):
+    """Claim daily bonus"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await message.reply("❌ Profile not found. Use /start first.")
+        return
+    
+    if db.check_daily_bonus_available(user_id):
+        db.claim_daily_bonus(user_id)
+        user = db.get_user(user_id)  # Refresh user data
+        
+        bonus_text = f"""
+🎁 {bold('DAILY BONUS CLAIMED!')} 🎁
+
+✅ You earned your daily bonus!
+�� Streak: {user['streak']} days 🔥
+🎯 Keep coming back tomorrow!
+
+🌟 Streak Rewards:
+3 days → +50 coins
+7 days → +100 coins
+30 days → Premium unlock
+
+Come back tomorrow! ⏰
+"""
+        await message.answer(bonus_text, parse_mode=ParseMode.HTML)
+    else:
+        bonus_text = "⏰ Daily bonus already claimed today.\n\nCome back tomorrow! 🌙"
+        await message.answer(bonus_text)
+
+async def cmd_admin(message: Message, state: FSMContext):
+    """Admin panel command"""
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await message.reply("⛔ You are not authorized to access admin panel.")
+        return
+    
+    admin_text = f"""
+🔐 {bold('ADMIN PANEL')} 🔐
+
+Welcome Admin! Choose an action:
+"""
+    
+    await message.answer(
+        admin_text,
+        reply_markup=get_admin_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    
+    await state.set_state(AdminStates.admin_managing)
+
+async def handle_admin_text(message: Message, state: FSMContext):
+    """Handle admin panel text responses"""
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        return
+    
+    text = message.text
+    
+    if text == "👥 Total Users":
+        total = db.get_total_users()
+        await message.reply(f"📊 Total Users: {bold(str(total))}", parse_mode=ParseMode.HTML)
+    
+    elif text == "📊 Statistics":
+        stats = db.get_bot_stats()
+        stats_text = f"""
+📊 {bold('BOT STATISTICS')} 📊
+
+👥 Total Users: {stats['total_users']}
+💎 Premium Users: {stats['premium_users']}
+📝 Generated Content: {stats['total_generated']}
+👥 Total Referrals: {stats['total_referrals']}
+🆕 New Users (7 days): {stats['new_users_week']}
+"""
+        await message.reply(stats_text, parse_mode=ParseMode.HTML)
+    
+    elif text == "🏆 Top Inviters":
+        top_inviters = db.get_top_inviters(5)
+        top_text = "🏆 " + bold("TOP 5 INVITERS") + "\n\n"
+        for idx, user in enumerate(top_inviters, 1):
+            top_text += f"{idx}. {user['first_name']} - {user['referrals_count']} 👥\n"
+        await message.reply(top_text, parse_mode=ParseMode.HTML)
+    
+    elif text == "👑 Give Premium":
+        await message.reply("Send user ID to give premium:")
+        await state.set_state(AdminStates.waiting_message)
+    
+    elif text == "⛔ Ban User":
+        await message.reply("Send user ID to ban:")
+        await state.set_state(AdminStates.waiting_message)
+    
+    elif text == "🎁 Remove Premium":
+        await message.reply("Send user ID to remove premium:")
+        await state.set_state(AdminStates.waiting_message)
+    
+    elif text == "✅ Unban User":
+        await message.reply("Send user ID to unban:")
+        await state.set_state(AdminStates.waiting_message)
+    
+    elif text == "📢 Broadcast":
+        await message.reply("Send message to broadcast to all users:")
+        await state.set_state(AdminStates.waiting_broadcast_type)
+    
+    elif text == "📤 Export Users":
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, username, first_name, referrals_count, premium_status FROM users WHERE banned = 0")
+        users = cursor.fetchall()
+        conn.close()
+        
+        csv_content = "user_id,username,first_name,referrals,premium\n"
+        for user in users:
+            csv_content += f"{user[0]},{user[1]},{user[2]},{user[3]},{user[4]}\n"
+        
+        await message.reply("📤 Users exported successfully!\n\nTotal: " + str(len(users)))
+    
+    elif text == "🔙 EXIT":
+        await message.reply("👋 Exiting admin panel", reply_markup=ReplyKeyboardRemove())
+        await state.clear()
+
+async def handle_admin_action(message: Message, state: FSMContext):
+    """Handle admin action (give/remove premium, ban/unban)"""
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        return
+    
+    try:
+        target_id = int(message.text)
+        current_state = await state.get_state()
+        
+        if "give" in current_state.lower() or "premium" in current_state.lower():
+            db.give_premium(target_id)
+            await message.reply(f"✅ Premium given to user {target_id}")
+        elif "ban" in current_state.lower():
+            db.ban_user(target_id)
+            await message.reply(f"⛔ User {target_id} has been banned")
+        elif "remove" in current_state.lower():
+            db.remove_premium(target_id)
+            await message.reply(f"🎁 Premium removed from user {target_id}")
+        elif "unban" in current_state.lower():
+            db.unban_user(target_id)
+            await message.reply(f"✅ User {target_id} has been unbanned")
+        
+        await state.clear()
+    
+    except ValueError:
+        await message.reply("❌ Invalid user ID. Please send a valid number.")
+
+async def handle_broadcast_text(message: Message, state: FSMContext):
+    """Handle broadcast message"""
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        return
+    
+    # Get all users
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE banned = 0")
+    users = cursor.fetchall()
+    conn.close()
+    
+    sent = 0
+    failed = 0
+    
+    for user_row in users:
+        try:
+            await message.bot.send_message(
+                user_row[0],
+                f"📢 {bold('ANNOUNCEMENT')} 📢\n\n" + message.text,
+                parse_mode=ParseMode.HTML
+            )
+            sent += 1
+        except:
+            failed += 1
+    
+    await message.reply(f"✅ Broadcast complete!\n📤 Sent: {sent}\n❌ Failed: {failed}")
+    await state.clear()
+
+async def handle_main_menu(message: Message, state: FSMContext):
+    """Handle main menu button presses"""
+    text = message.text
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await message.reply("❌ Please use /start first")
+        return
+    
+    if text == "🎨 BIO GENERATOR":
+        bio_text = """
+🎨 Choose Bio Type:
+
+📱 Telegram Bios
+📸 Instagram Bios
+🎥 TikTok Bios
+🎯 Special Categories
+"""
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Telegram", callback_data="gen_tg")],
+            [InlineKeyboardButton(text="📸 Instagram", callback_data="gen_ig")],
+            [InlineKeyboardButton(text="🎥 TikTok", callback_data="gen_tt")],
+            [InlineKeyboardButton(text="🎯 Special", callback_data="special_bios")],
+            [InlineKeyboardButton(text="🎨 All Styles", callback_data="all_styles")],
+        ])
+        await message.answer(bio_text, reply_markup=keyboard)
+    
+    elif text == "📸 CAPTIONS":
+        await message.answer(
+            "📸 Choose Caption Type:",
+            reply_markup=get_caption_keyboard(user['premium_status'])
+        )
+    
+    elif text == "🎭 USERNAME":
+        username = ContentGenerator.generate_username()
+        bio_text = f"""
+🎭 {bold('GENERATED USERNAME')} 🎭
+
+{bold('Your Style:')}
+`{username}`
+
+👆 Tap to copy!
+
+Generate more:
+"""
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_username")],
+            [InlineKeyboardButton(text="🎨 Stylish Text", callback_data="gen_stylish")],
+        ])
+        await message.answer(bio_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        db.save_generated_content(user_id, "username", username)
+    
+    elif text == "✨ STYLISH TEXT":
+        text_input = "Example Text"
+        stylish = ContentGenerator.generate_stylish_text(text_input)
+        stylish_text = f"""
+✨ {bold('STYLISH TEXT GENERATOR')} ✨
+
+{bold('Your Text:')}
+`{stylish}`
+
+Try different styles:
+"""
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 New Style", callback_data="gen_stylish")],
+            [InlineKeyboardButton(text="📝 Enter Custom Text", callback_data="custom_stylish")],
+        ])
+        await message.answer(stylish_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    
+    elif text == "👥 REFERRALS":
+        await cmd_referral(message)
+    
+    elif text == "📊 PROFILE":
+        await cmd_profile(message)
+    
+    elif text == "🏆 LEADERBOARD":
+        await cmd_leaderboard(message)
+    
+    elif text == "🎁 DAILY BONUS":
+        await cmd_daily_bonus(message)
+
+async def handle_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Handle all callback queries"""
+    user_id = callback.from_user.id
+    user = db.get_user(user_id)
+    data = callback.data
+    
+    if not user:
+        await callback.answer("❌ Profile not found")
+        return
+    
+    # Check if user is banned
+    if db.is_banned(user_id):
+        await callback.answer("⛔ You are banned!", show_alert=True)
+        return
+    
+    # Save generated content
+    def save_bio(content: str, bio_type: str):
+        db.save_generated_content(user_id, bio_type, content)
+    
+    # Telegram Bio
+    if data == "gen_tg":
+        bio = ContentGenerator.generate_telegram_bio()
+        save_bio(bio, "telegram_bio")
+        await callback.message.edit_text(
+            f"📱 {bold('TELEGRAM BIO')} 📱\n\n`{bio}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_tg")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="back_menu")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # Instagram Bio
+    elif data == "gen_ig":
+        bio = ContentGenerator.generate_instagram_bio()
+        save_bio(bio, "instagram_bio")
+        await callback.message.edit_text(
+            f"📸 {bold('INSTAGRAM BIO')} 📸\n\n`{bio}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_ig")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="back_menu")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # TikTok Bio
+    elif data == "gen_tt":
+        bio = ContentGenerator.generate_tiktok_bio()
+        save_bio(bio, "tiktok_bio")
+        await callback.message.edit_text(
+            f"🎥 {bold('TIKTOK BIO')} 🎥\n\n`{bio}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_tt")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="back_menu")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # Dark Vibe Bio
+    elif data == "gen_dark":
+        if user['referrals_count'] >= 2:
+            bio = ContentGenerator.generate_dark_bio()
+            save_bio(bio, "dark_bio")
+            await callback.message.edit_text(
+                f"🌑 {bold('DARK VIBE BIO')} 🌑\n\n`{bio}`\n\n👆 Tap to copy!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_dark")],
+                    [InlineKeyboardButton(text="⬅️ Back", callback_data="all_styles")],
+                ]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await callback.answer(get_lock_message("dark"), show_alert=True)
+    
+    # Luxury Bio
+    elif data == "gen_luxury":
+        if user['referrals_count'] >= 2:
+            bio = ContentGenerator.generate_luxury_bio()
+            save_bio(bio, "luxury_bio")
+            await callback.message.edit_text(
+                f"💎 {bold('LUXURY VIBE BIO')} 💎\n\n`{bio}`\n\n👆 Tap to copy!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_luxury")],
+                    [InlineKeyboardButton(text="⬅️ Back", callback_data="all_styles")],
+                ]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await callback.answer(get_lock_message("luxury"), show_alert=True)
+    
+    # Love Bio
+    elif data == "gen_love":
+        if user['referrals_count'] >= 2:
+            bio = ContentGenerator.generate_love_bio()
+            save_bio(bio, "love_bio")
+            await callback.message.edit_text(
+                f"❤️ {bold('LOVE BIO')} ❤️\n\n`{bio}`\n\n👆 Tap to copy!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_love")],
+                    [InlineKeyboardButton(text="⬅️ Back", callback_data="all_styles")],
+                ]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await callback.answer(get_lock_message("love"), show_alert=True)
+    
+    # Sad Bio
+    elif data == "gen_sad":
+        if user['referrals_count'] >= 5:
+            bio = ContentGenerator.generate_sad_bio()
+            save_bio(bio, "sad_bio")
+            await callback.message.edit_text(
+                f"😢 {bold('EMOTIONAL BIO')} 😢\n\n`{bio}`\n\n👆 Tap to copy!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_sad")],
+                    [InlineKeyboardButton(text="⬅️ Back", callback_data="all_styles")],
+                ]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await callback.answer(f"😢 Need 5 referrals! You have {user['referrals_count']}/5", show_alert=True)
+    
+    # Mafia Bio
+    elif data == "gen_mafia":
+        if user['referrals_count'] >= 5:
+            bio = ContentGenerator.generate_mafia_bio()
+            save_bio(bio, "mafia_bio")
+            await callback.message.edit_text(
+                f"👿 {bold('MAFIA VIBES BIO')} 👿\n\n`{bio}`\n\n👆 Tap to copy!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_mafia")],
+                    [InlineKeyboardButton(text="⬅️ Back", callback_data="all_styles")],
+                ]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await callback.answer(f"👿 Need 5 referrals! You have {user['referrals_count']}/5", show_alert=True)
+    
+    # Student Bio
+    elif data == "gen_student":
+        bio = ContentGenerator.generate_student_bio()
+        save_bio(bio, "student_bio")
+        await callback.message.edit_text(
+            f"📚 {bold('STUDENT BIO')} 📚\n\n`{bio}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_student")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="special_bios")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # Business Bio
+    elif data == "gen_business":
+        bio = ContentGenerator.generate_business_bio()
+        save_bio(bio, "business_bio")
+        await callback.message.edit_text(
+            f"💼 {bold('BUSINESS BIO')} 💼\n\n`{bio}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_business")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="special_bios")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # Football Bio
+    elif data == "gen_football":
+        bio = ContentGenerator.generate_football_bio()
+        save_bio(bio, "football_bio")
+        await callback.message.edit_text(
+            f"⚽ {bold('FOOTBALL FAN BIO')} ⚽\n\n`{bio}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_football")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="special_bios")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # Car Lover Bio
+    elif data == "gen_car":
+        bio = ContentGenerator.generate_car_bio()
+        save_bio(bio, "car_bio")
+        await callback.message.edit_text(
+            f"🏎️ {bold('CAR LOVER BIO')} 🏎️\n\n`{bio}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_car")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="special_bios")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # Reel Caption
+    elif data == "gen_reel":
+        caption = ContentGenerator.generate_reel_caption()
+        save_bio(caption, "reel_caption")
+        await callback.message.edit_text(
+            f"📹 {bold('REEL CAPTION')} 📹\n\n`{caption}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_reel")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="back_menu")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # Story Caption
+    elif data == "gen_story":
+        caption = ContentGenerator.generate_story_caption()
+        save_bio(caption, "story_caption")
+        await callback.message.edit_text(
+            f"📸 {bold('STORY CAPTION')} 📸\n\n`{caption}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_story")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="back_menu")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # Username Generator
+    elif data == "gen_username":
+        username = ContentGenerator.generate_username()
+        save_bio(username, "username")
+        await callback.message.edit_text(
+            f"🎭 {bold('USERNAME')} 🎭\n\n`{username}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Generate More", callback_data="gen_username")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="back_menu")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # Stylish Text
+    elif data == "gen_stylish":
+        stylish = ContentGenerator.generate_stylish_text("Your Text")
+        save_bio(stylish, "stylish_text")
+        await callback.message.edit_text(
+            f"✨ {bold('STYLISH TEXT')} ✨\n\n`{stylish}`\n\n👆 Tap to copy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 New Style", callback_data="gen_stylish")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="back_menu")],
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        await callback.answer()
+    
+    # All Styles
+    elif data == "all_styles":
+        await callback.message.edit_text(
+            "🎨 Choose Your Style:",
+            reply_markup=get_bio_style_keyboard(user['premium_status'])
+        )
+    
+    # Special Bios
+    elif data == "special_bios":
+        await callback.message.edit_text(
+            "🎯 Special Bio Categories:",
+            reply_markup=get_special_bio_keyboard(user['premium_status'])
+        )
+    
+    # Locked features
+    elif data.startswith("locked_"):
+        feature = data.replace("locked_", "")
+        await callback.answer(get_lock_message(feature), show_alert=True)
+    
+    # Back to menu
+    elif data == "back_menu":
+        await callback.message.edit_text(
+            "🏠 Main Menu",
+            reply_markup=get_main_keyboard(user['referrals_count'])
+        )
+    
+    # Copy referral link
+    elif data == "copy_ref":
+        await callback.answer("📋 Referral link copied to clipboard!", show_alert=True)
+    
+    # Share referral link
+    elif data == "share_ref":
+        ref_link = db.get_referral_link(user_id)
+        share_text = f"🎉 Join Premium Bio Generator!\n\n{ref_link}\n\n👯 Invite your friends and unlock premium features!"
+        await callback.answer()
+        await callback.message.answer(share_text)
+
+# ============================================================================
+# MAIN BOT SETUP
+# ============================================================================
+
+async def main():
+    """Main bot function"""
+    global db
+    
+    # Initialize database
+    db = Database(DATABASE_PATH)
+    
+    # Initialize bot and dispatcher
+    bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+    dp = Dispatcher()
+    
+    # Setup default commands
+    await setup_default_commands(bot)
+    
+    # Register routers
+    router = Router()
+    
+    # Commands
+    router.message.register(cmd_start, Command("start"))
+    router.message.register(cmd_help, Command("help"))
+    router.message.register(cmd_profile, Command("profile"))
+    router.message.register(cmd_referral, Command("referral"))
+    router.message.register(cmd_leaderboard, Command("leaderboard"))
+    router.message.register(cmd_admin, Command("admin"))
+    
+    # Main menu
+    router.message.register(handle_main_menu)
+    
+    # Admin panel
+    router.message.register(
+        handle_admin_text,
+        StateFilter(AdminStates.admin_managing)
+    )
+    router.message.register(
+        handle_admin_action,
+        StateFilter(AdminStates.waiting_message)
+    )
+    router.message.register(
+        handle_broadcast_text,
+        StateFilter(AdminStates.waiting_broadcast_type)
+    )
+    
+    # Callbacks
+    router.callback_query.register(handle_callback)
+    
+    dp.include_router(router)
+    
+    # Start polling
+    logger.info("Bot started successfully!")
+    try:
+        await dp.start_polling(bot)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped")
+    finally:
+        await bot.session.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
