@@ -8,12 +8,11 @@ api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
-client = TelegramClient("bot", api_id, api_hash).start(bot_token=bot_token)
+client = TelegramClient("bot", api_id, api_hash)
 
 @client.on(events.NewMessage)
 async def handler(event):
     text = event.raw_text
-
     usernames = [u.replace("@", "").strip() for u in text.split() if u.strip()]
 
     empty, busy = [], []
@@ -32,7 +31,7 @@ async def handler(event):
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
 
-        except Exception:
+        except:
             continue
 
     msg = ""
@@ -45,16 +44,10 @@ async def handler(event):
 
     await event.reply(msg or "No valid usernames")
 
-# 🔥 Anti-crash loop
 async def main():
-    while True:
-        try:
-            print("Bot started...")
-            await client.run_until_disconnected()
-        except Exception as e:
-            print(f"Restarting... {e}")
-            await asyncio.sleep(5)
+    print("Bot running...")
+    await client.start(bot_token=bot_token)
+    await client.run_until_disconnected()
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
