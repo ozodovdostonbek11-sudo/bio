@@ -27,7 +27,6 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 
 def extract_usernames(text: str) -> List[str]:
-    """Extract valid usernames from messy input."""
     cleaned = re.sub(r'[^\w@\s\n]', '', text, flags=re.UNICODE)
     potential = re.findall(r'@?([a-zA-Z0-9_]+)', cleaned)
     
@@ -41,7 +40,6 @@ def extract_usernames(text: str) -> List[str]:
 
 
 async def check_username(username: str) -> Tuple[str, bool]:
-    """Check if username is available."""
     try:
         await client(CheckUsernameRequest(username))
         return username, True
@@ -61,7 +59,6 @@ async def check_username(username: str) -> Tuple[str, bool]:
 
 
 async def check_usernames_batch(usernames: List[str]) -> Tuple[List[str], List[str]]:
-    """Check multiple usernames with anti-flood protection."""
     available = []
     taken = []
     
@@ -85,7 +82,6 @@ async def check_usernames_batch(usernames: List[str]) -> Tuple[List[str], List[s
 
 
 def format_response(available: List[str], taken: List[str]) -> str:
-    """Format results into a clean message."""
     lines = []
     
     if available:
@@ -106,7 +102,6 @@ def format_response(available: List[str], taken: List[str]) -> str:
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    """Handle /start command."""
     if OWNER_ID and event.sender_id != OWNER_ID:
         await event.reply("❌ Unauthorized access.")
         return
@@ -128,7 +123,6 @@ async def start_handler(event):
 
 @client.on(events.NewMessage(incoming=True))
 async def check_handler(event):
-    """Handle username checking requests."""
     if event.message.text.startswith('/'):
         return
     
@@ -161,7 +155,6 @@ async def check_handler(event):
 
 
 async def main():
-    """Main function to start the bot."""
     logger.info("Starting Telegram Username Checker Bot...")
     
     try:
@@ -182,106 +175,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
-async def start_handler(event):
-    """Handle /start command."""
-    if OWNER_ID and event.sender_id != OWNER_ID:
-        await event.reply("❌ Unauthorized access.")
-        return
-    
-    welcome = (
-        "🤖 **Telegram Username Checker**\n\n"
-        "Send me usernames to check availability.\n\n"
-        "**Format:**\n"
-        "• One per line\n"
-        "• With or without @\n"
-        "• 5-32 characters\n"
-        "• Letters, numbers, underscores only\n\n"
-        "**Example:**\n"
-        "```\nusername1\n@username2\nusername_3\n```"
-    )
-    await event.reply(welcome, parse_mode='markdown')
-    logger.info(f"Start command from {event.sender_id}")
-
-
-@client.on(events.NewMessage(incoming=True))
-async def check_handler(event):
-    """Handle username checking requests."""
-    if event.message.text.startswith('/'):
-        return
-    
-    if OWNER_ID and event.sender_id != OWNER_ID:
-        await event.reply("❌ Unauthorized access.")
-        return
-    
-    try:
-        text = event.message.text
-        logger.info(f"Received message from {event.sender_id}: {text[:50]}...")
-        
-        usernames = extract_usernames(text)
-        
-        if not usernames:
-            await event.reply("❌ No valid usernames found. Use 5-32 characters (letters, numbers, underscores).")
-            return
-        
-        await event.reply(f"🔍 Checking {len(usernames)} username(s)...")
-        
-        available, taken = await check_usernames_batch(usernames)
-        
-        response = format_response(available, taken)
-        await event.reply(response)
-        
-        logger.info(f"Checked {len(usernames)} usernames: {len(available)} available, {len(taken)} taken")
-        
-    except Exception as e:
-        logger.error(f"Error in check_handler: {e}")
-        await event.reply(f"❌ Error: {str(e)[:100]}")
-
-
-async def main():
-    """Main function to start the bot."""
-    logger.info("Starting Telegram Username Checker Bot...")
-    
-    try:
-        # Import session string
-        await client.import_session_string(SESSION_STRING)
-        await client.connect()
-        logger.info("User session connected successfully")
-        
-        me = await client.get_me()
-        logger.info(f"Connected as: {me.first_name} (@{me.username})")
-        
-        await client.run_until_disconnected()
-        
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        raise
-    finally:
-        await client.disconnect()
-
-
-if __name__ == '__main__':
-    asyncio.run(main())
-SESSION_STRING olish uchun (lokal kompyuteringizda):
-
-get_session.py faylini yarating:
-
-import asyncio
-from telethon import TelegramClient
-
-API_ID = int(input("API_ID: "))
-API_HASH = input("API_HASH: ")
-PHONE = input("PHONE (+998...): ")
-
-async def main():
-    client = TelegramClient('temp_session', API_ID, API_HASH)
-    await client.start(phone=PHONE)
-    
-    # Get session string
-    session_string = client.session.save()
-    print("\n✅ SESSION_STRING:")
-    print(session_string)
-    
-    await client.disconnect()
-
-asyncio.run(main())
