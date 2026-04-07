@@ -16,13 +16,14 @@ logger = logging.getLogger(__name__)
 
 API_ID = int(os.getenv('API_ID', '0'))
 API_HASH = os.getenv('API_HASH', '')
-PHONE = os.getenv('PHONE', '')
+SESSION_STRING = os.getenv('SESSION_STRING', '')
 OWNER_ID = int(os.getenv('OWNER_ID', '0'))
 
-if not all([API_ID, API_HASH, PHONE]):
-    raise ValueError("Missing required environment variables: API_ID, API_HASH, PHONE")
+if not all([API_ID, API_HASH, SESSION_STRING]):
+    raise ValueError("Missing required environment variables: API_ID, API_HASH, SESSION_STRING")
 
-client = TelegramClient('user_session', API_ID, API_HASH)
+# Use session string instead of phone
+client = TelegramClient(None, API_ID, API_HASH)
 
 
 def extract_usernames(text: str) -> List[str]:
@@ -42,18 +43,14 @@ def extract_usernames(text: str) -> List[str]:
 async def check_username(username: str) -> Tuple[str, bool]:
     """Check if username is available."""
     try:
-        result = await client(CheckUsernameRequest(username))
-        # If no exception, username is available
+        await client(CheckUsernameRequest(username))
         return username, True
     except Exception as e:
         error_msg = str(e).lower()
-        # Username is taken if we get "occupied" error
         if 'occupied' in error_msg or 'taken' in error_msg:
             return username, False
-        # Available if "not occupied"
         elif 'not occupied' in error_msg:
             return username, True
-        # FloodWait - retry after delay
         elif 'flood' in error_msg:
             logger.warning(f"FloodWaitError for {username}, retrying...")
             await asyncio.sleep(5)
@@ -168,9 +165,10 @@ async def main():
     logger.info("Starting Telegram Username Checker Bot...")
     
     try:
-        # Connect with user account
-        await client.start(phone=PHONE)
-        logger.info("User session started successfully")
+        # Import session string
+        await client.import_session_string(SESSION_STRING)
+        await client.connect()
+        logger.info("User session connected successfully")
         
         me = await client.get_me()
         logger.info(f"Connected as: {me.first_name} (@{me.username})")
@@ -186,3 +184,26 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+SESSION_STRING olish uchun (lokal kompyuteringizda):
+
+get_session.py faylini yarating:
+
+import asyncio
+from telethon import TelegramClient
+
+API_ID = int(input("API_ID: "))
+API_HASH = input("API_HASH: ")
+PHONE = input("PHONE (+998...): ")
+
+async def main():
+    client = TelegramClient('temp_session', API_ID, API_HASH)
+    await client.start(phone=PHONE)
+    
+    # Get session string
+    session_string = client.session.save()
+    print("\n✅ SESSION_STRING:")
+    print(session_string)
+    
+    await client.disconnect()
+
+asyncio.run(main())
