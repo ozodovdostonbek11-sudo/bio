@@ -5,28 +5,24 @@ import re
 import random
 from typing import Tuple, List
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError, UsernameNotOccupiedError, UsernameOccupiedError
+from telethon.errors import FloodWaitError
 from telethon.tl.functions.account import CheckUsernameRequest
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 API_ID = int(os.getenv('API_ID', '0'))
 API_HASH = os.getenv('API_HASH', '')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+PHONE = os.getenv('PHONE', '')
 OWNER_ID = int(os.getenv('OWNER_ID', '0'))
 
-# Validate credentials
-if not all([API_ID, API_HASH, BOT_TOKEN]):
-    raise ValueError("Missing required environment variables: API_ID, API_HASH, BOT_TOKEN")
+if not all([API_ID, API_HASH, PHONE]):
+    raise ValueError("Missing required environment variables: API_ID, API_HASH, PHONE")
 
-# Initialize client
-client = TelegramClient('bot_session', API_ID, API_HASH)
+client = TelegramClient('user_session', API_ID, API_HASH)
 
 
 def extract_usernames(text: str) -> List[str]:
@@ -46,19 +42,25 @@ def extract_usernames(text: str) -> List[str]:
 async def check_username(username: str) -> Tuple[str, bool]:
     """Check if username is available."""
     try:
-        await client(CheckUsernameRequest(username))
+        result = await client(CheckUsernameRequest(username))
+        # If no exception, username is available
         return username, True
-    except UsernameOccupiedError:
-        return username, False
-    except UsernameNotOccupiedError:
-        return username, True
-    except FloodWaitError as e:
-        logger.warning(f"FloodWaitError: waiting {e.seconds} seconds")
-        await asyncio.sleep(e.seconds)
-        return await check_username(username)
     except Exception as e:
-        logger.error(f"Error checking {username}: {e}")
-        return username, None
+        error_msg = str(e).lower()
+        # Username is taken if we get "occupied" error
+        if 'occupied' in error_msg or 'taken' in error_msg:
+            return username, False
+        # Available if "not occupied"
+        elif 'not occupied' in error_msg:
+            return username, True
+        # FloodWait - retry after delay
+        elif 'flood' in error_msg:
+            logger.warning(f"FloodWaitError for {username}, retrying...")
+            await asyncio.sleep(5)
+            return await check_username(username)
+        else:
+            logger.error(f"Error checking {username}: {e}")
+            return username, None
 
 
 async def check_usernames_batch(usernames: List[str]) -> Tuple[List[str], List[str]]:
@@ -100,7 +102,7 @@ def format_response(available: List[str], taken: List[str]) -> str:
         lines.extend(taken)
     
     if not lines:
-        return "No valid usernames found. Please provide 5-32 character usernames."
+        return "No valid usernames found. Use 5-32 characters (letters, numbers, underscores)."
     
     return "\n".join(lines)
 
@@ -130,7 +132,6 @@ async def start_handler(event):
 @client.on(events.NewMessage(incoming=True))
 async def check_handler(event):
     """Handle username checking requests."""
-    # Skip /start command
     if event.message.text.startswith('/'):
         return
     
@@ -167,11 +168,12 @@ async def main():
     logger.info("Starting Telegram Username Checker Bot...")
     
     try:
-        await client.start(bot_token=BOT_TOKEN)
-        logger.info("Bot started successfully")
+        # Connect with user account
+        await client.start(phone=PHONE)
+        logger.info("User session started successfully")
         
         me = await client.get_me()
-        logger.info(f"Bot username: @{me.username}")
+        logger.info(f"Connected as: {me.first_name} (@{me.username})")
         
         await client.run_until_disconnected()
         
