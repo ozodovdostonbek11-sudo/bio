@@ -2,83 +2,81 @@ import asyncio
 import logging
 import os
 import re
-from typing import List
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import ResolveUsernameRequest
-from telethon.errors import UsernameNotOccupiedError, FloodWaitError
+from telethon.tl.functions.account import UpdateUsernameRequest
+from telethon.errors import (
+    UsernameNotOccupiedError,
+    UsernameOccupiedError,
+    FloodWaitError
+)
 
-# ---------- LOG ----------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("fast-checker")
-
-# ---------- ENV ----------
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-SESSION_STRING = os.getenv("SESSION_STRING", "")
+# -------- CONFIG --------
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+SESSION_STRING = os.getenv("SESSION_STRING")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-# ---------- PARSER ----------
-def extract_usernames(text: str) -> List[str]:
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("PRO")
+
+# -------- PARSER --------
+def extract_usernames(text):
     return list(set(re.findall(r'@?([a-zA-Z0-9_]{5,32})', text)))
 
-# ---------- CHECK ----------
-async def check_one(username: str):
+# -------- FAST CHECK --------
+async def fast_check(username):
     try:
         await client(ResolveUsernameRequest(username))
-        return username, "taken"
-
+        return False  # band
     except UsernameNotOccupiedError:
-        return username, "available"
+        return True   # ehtimol bo‘sh
+    except:
+        return False
 
+# -------- REAL CHECK --------
+async def real_check(username, original):
+    try:
+        await client(UpdateUsernameRequest(username))
+        await client(UpdateUsernameRequest(original))  # qaytarish
+        return True
+    except UsernameOccupiedError:
+        return False
     except FloodWaitError as e:
-        logger.warning(f"FloodWait {e.seconds}s")
         await asyncio.sleep(e.seconds)
-        return await check_one(username)
+        return await real_check(username, original)
+    except:
+        return False
 
-    except Exception as e:
-        logger.error(f"{username} error: {e}")
-        return username, "error"
+# -------- MAIN CHECK --------
+async def check_usernames(usernames):
+    me = await client.get_me()
+    original = me.username
 
-# ---------- PARALLEL CHECK ----------
-async def check_usernames(usernames: List[str]):
-    tasks = [check_one(u) for u in usernames]
-    results = await asyncio.gather(*tasks)
+    real_available = []
 
-    available, taken, errors = [], [], []
+    for username in usernames:
+        is_free = await fast_check(username)
 
-    for username, status in results:
-        if status == "available":
-            available.append(username)
-        elif status == "taken":
-            taken.append(username)
-        else:
-            errors.append(username)
+        if not is_free:
+            continue
 
-    return available, taken, errors
+        # REAL check
+        ok = await real_check(username, original)
 
-# ---------- FORMAT ----------
-def format_result(a, t, e):
-    text = ""
+        if ok:
+            real_available.append(username)
 
-    if a:
-        text += "✅ Available:\n" + "\n".join(f"@{x}" for x in a)
+        await asyncio.sleep(2)
 
-    if t:
-        if text: text += "\n\n"
-        text += "❌ Taken:\n" + "\n".join(f"@{x}" for x in t)
+    return real_available
 
-    if e:
-        if text: text += "\n\n"
-        text += "⚠️ Errors:\n" + "\n".join(f"@{x}" for x in e)
-
-    return text or "❗ Nothing found"
-
-# ---------- HANDLER ----------
-@client.on(events.NewMessage)
+# -------- HANDLER --------
+@client.on(events.NewMessage(incoming=True))
 async def handler(event):
     if OWNER_ID and event.sender_id != OWNER_ID:
         return
@@ -86,23 +84,26 @@ async def handler(event):
     usernames = extract_usernames(event.raw_text)
 
     if not usernames:
-        await event.reply("❗ No valid usernames")
+        await event.reply("❌ No valid usernames")
         return
 
-    msg = await event.reply("⏳ Checking...")
+    msg = await event.reply("🔍 Checking REAL availability...")
 
-    available, taken, errors = await check_usernames(usernames)
+    result = await check_usernames(usernames)
 
-    result = format_result(available, taken, errors)
-    await msg.edit(result)
+    if result:
+        text = "🔥 REAL AVAILABLE:\n" + "\n".join(f"@{u}" for u in result)
+    else:
+        text = "❌ No real available usernames"
 
-# ---------- MAIN ----------
+    await msg.edit(text)
+
+# -------- MAIN --------
 async def main():
     await client.start()
-
     me = await client.get_me()
-    logger.info(f"Connected as: {me.first_name or 'NoName'}")
 
+    logger.info(f"Connected as {me.first_name}")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
