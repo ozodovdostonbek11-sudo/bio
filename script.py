@@ -4,8 +4,8 @@ from datetime import datetime
 from telethon import TelegramClient, functions
 from telethon.errors import FloodWaitError
 
-api_id = 123456
-api_hash = 'API_HASH'
+api_id = 13401431
+api_hash = '2528bb33cc1abf8ae18678eb8da8d20c'
 
 DAILY_LIMIT = 20
 
