@@ -38,28 +38,27 @@ def extract_usernames(text: str) -> List[str]:
     return valid
 
 
-async def check_username(username: str) -> Tuple[str, bool]:
+async def main():
+    logger.info("Starting Telegram Username Checker Bot...")
+    
     try:
-        await client(CheckUsernameRequest(username))
-        return username, True
+        await client.connect()
+        logger.info("User session connected successfully")
+        
+        me = await client.get_me()
+        logger.info(f"Connected as: {me.first_name} (@{me.username})")
+        
+        logger.info("Bot is running and listening for messages...")
+        
+        # Keep bot running
+        while True:
+            await asyncio.sleep(1)
+        
     except Exception as e:
-        error_msg = str(e).lower()
-        if 'occupied' in error_msg or 'taken' in error_msg:
-            return username, False
-        elif 'not occupied' in error_msg:
-            return username, True
-        elif 'flood' in error_msg:
-            logger.warning(f"FloodWaitError for {username}, retrying...")
-            await asyncio.sleep(5)
-            return await check_username(username)
-        else:
-            logger.error(f"Error checking {username}: {e}")
-            return username, None
-
-
-async def check_usernames_batch(usernames: List[str]) -> Tuple[List[str], List[str]]:
-    available = []
-    taken = []
+        logger.error(f"Fatal error: {e}")
+        raise
+    finally:
+        await client.disconnect()
     
     for username in usernames:
         try:
