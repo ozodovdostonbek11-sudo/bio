@@ -1,8 +1,8 @@
 import asyncio
 import random
+import os
 from telethon import TelegramClient, events, functions
 from telethon.errors import FloodWaitError
-import os
 
 api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
@@ -16,8 +16,7 @@ async def handler(event):
 
     usernames = [u.replace("@", "").strip() for u in text.split() if u.strip()]
 
-    empty = []
-    busy = []
+    empty, busy = [], []
 
     for username in usernames:
         try:
@@ -28,13 +27,13 @@ async def handler(event):
             else:
                 busy.append(username)
 
-            await asyncio.sleep(random.randint(5, 10))
+            await asyncio.sleep(random.randint(4, 8))
 
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
 
-        except:
-            pass
+        except Exception:
+            continue
 
     msg = ""
 
@@ -44,9 +43,18 @@ async def handler(event):
     if busy:
         msg += "❌ Taken:\n" + "\n".join(busy)
 
-    await event.reply(msg if msg else "No valid usernames")
+    await event.reply(msg or "No valid usernames")
 
+# 🔥 Anti-crash loop
 async def main():
-    await client.run_until_disconnected()
+    while True:
+        try:
+            print("Bot started...")
+            await client.run_until_disconnected()
+        except Exception as e:
+            print(f"Restarting... {e}")
+            await asyncio.sleep(5)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
+    
