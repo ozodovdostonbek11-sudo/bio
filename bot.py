@@ -5,7 +5,6 @@ import re
 import random
 from typing import Tuple, List
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import CheckUsernameRequest
 
@@ -95,82 +94,7 @@ def format_response(available: List[str], taken: List[str]) -> str:
         lines.extend(taken)
     
     if not lines:
-        return "No valid usernames found. Use 5-32 characters (letters, numbers, underscores)."
-    
-    return "\n".join(lines)
-
-
-@client.on(events.NewMessage(pattern='/start'))
-async def start_handler(event):
-    if OWNER_ID and event.sender_id != OWNER_ID:
-        await event.reply("❌ Unauthorized access.")
-        return
-    
-    welcome = (
-        "🤖 **Telegram Username Checker**\n\n"
-        "Send me usernames to check availability.\n\n"
-        "**Format:**\n"
-        "• One per line\n"
-        "• With or without @\n"
-        "• 5-32 characters\n"
-        "• Letters, numbers, underscores only\n\n"
-        "**Example:**\n"
-        "```\nusername1\n@username2\nusername_3\n```"
-    )
-    await event.reply(welcome, parse_mode='markdown')
-    logger.info(f"Start command from {event.sender_id}")
-
-
-@client.on(events.NewMessage(incoming=True))
-async def check_handler(event):
-    if event.message.text.startswith('/'):
-        return
-    
-    if OWNER_ID and event.sender_id != OWNER_ID:
-        await event.reply("❌ Unauthorized access.")
-        return
-    
-    try:
-        text = event.message.text
-        logger.info(f"Received message from {event.sender_id}: {text[:50]}...")
-        
-        usernames = extract_usernames(text)
-        
-        if not usernames:
-            await event.reply("❌ No valid usernames found. Use 5-32 characters (letters, numbers, underscores).")
-            return
-        
-        await event.reply(f"🔍 Checking {len(usernames)} username(s)...")
-        
-        available, taken = await check_usernames_batch(usernames)
-        
-        response = format_response(available, taken)
-        await event.reply(response)
-        
-        logger.info(f"Checked {len(usernames)} usernames: {len(available)} available, {len(taken)} taken")
-        
-    except Exception as e:
-        logger.error(f"Error in check_handler: {e}")
-        await event.reply(f"❌ Error: {str(e)[:100]}")
-
-
-async def main():
-    logger.info("Starting Telegram Username Checker Bot...")
-    
-    try:
-        await client.connect()
-        logger.info("User session connected successfully")
-        
-        me = await client.get_me()
-        logger.info(f"Connected as: {me.first_name} (@{me.username})")
-        
-        await client.run_until_disconnected()
-        
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        raise
-    finally:
-        await client.disconnect()
+        return "No valid usernames found. Use 
 
 
 if __name__ == '__main__':
